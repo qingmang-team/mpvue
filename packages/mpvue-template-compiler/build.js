@@ -4580,7 +4580,7 @@ var component = {
     var mpcomid = ast.mpcomid;
     var slots = ast.slots;
     if (slotName) {
-      attrsMap['data'] = "{{...$root[$p], $root}}";
+      attrsMap['data'] = "{{...$root[$k], $root}}";
       attrsMap['is'] = "{{" + slotName + "}}";
     } else {
       var slotsName = getSlotsName(slots);
@@ -4725,28 +4725,27 @@ function convertAst (node, options, util) {
   wxmlAst.slots = {};
   if (currentIsComponent && children && children.length) {
     // 只检查组件下的子节点（不检查孙子节点）是不是具名 slot，不然就是 default slot
-    children
-      .reduce(function (res, n) {
-        var ref = n.attrsMap || {};
-        var slot = ref.slot;
-        // 不是具名的，全部放在第一个数组元素中
-        var arr = slot ? res : res[0];
-        arr.push(n);
-        return res
-      }, [[]])
-      .forEach(function (n) {
-        var isDefault = Array.isArray(n);
-        var slotName = isDefault ? 'default' : n.attrsMap.slot;
-        var slotId = moduleId + "-" + slotName + "-" + (mpcomid.replace(/\'/g, ''));
-        var node = isDefault ? { tag: 'slot', attrsMap: {}, children: n } : n;
+    var slotMap = { default: [] };
 
-        node.tag = 'template';
-        node.attrsMap.name = slotId;
-        delete node.attrsMap.slot;
-        // 缓存，会集中生成一个 slots 文件
-        slots[slotId] = { node: convertAst(node, options, util), name: slotName, slotId: slotId };
-        wxmlAst.slots[slotName] = slotId;
-      });
+    children.forEach(function (child) {
+      var slotName = (child.attrsMap && child.attrsMap.slot) || 'default';
+      if (!slotMap[slotName]) {
+        slotMap[slotName] = [];
+      }
+      if (child.attrsMap) {
+        delete child.attrsMap.slot;
+      }
+      slotMap[slotName].push(child);
+    });
+
+    Object.keys(slotMap).forEach(function (slotName) {
+      var slotId = moduleId + "-" + slotName + "-" + (mpcomid.replace(/\'/g, ''));
+      var node = { tag: 'template', attrsMap: { name: slotId }, children: slotMap[slotName] };
+
+      // 缓存，会集中生成一个 slots 文件
+      slots[slotId] = { node: convertAst(node, options, util), name: slotName, slotId: slotId };
+      wxmlAst.slots[slotName] = slotId;
+    });
     // 清理当前组件下的节点信息，因为 slot 都被转移了
     children.length = 0;
     wxmlAst.children.length = 0;
@@ -4790,6 +4789,20 @@ function wxmlAst (compiled, options, log) {
     wxast: wxast,
     deps: deps,
     slots: slots
+  }
+}
+
+// 计算当前slot嵌套组件的深度，因为是从父开始向上查找，所以从1开始，而且至少有1层
+function computeDepth (node, components, depth) {
+  if ( depth === void 0 ) depth = 1;
+
+  if (node.parent) {
+    if (component.isComponent(node.parent.tag, components)) {
+      depth++;
+    }
+    return computeDepth(node.parent, components, depth)
+  } else {
+    return depth
   }
 }
 
@@ -4873,11 +4886,74 @@ function compileToWxml (compiled, options) {
   // 生成 slots code
   Object.keys(slots).forEach(function (k) {
     var slot = slots[k];
-    slot.code = generate$2(slot.node, options);
+    var row = generate$2(slot.node, options);
+    // slot中的表达式，即{{}}包裹的代码需要加上作用域
+    slot.code = (row || '').split(splitExpressionReg).map(function (expression) {
+      if (isExpression(expression) && !/\$root/.test(expression)) {
+        return handleExpression(expression, slot.depth)
+      } else {
+        return expression
+      }
+    }).join('');
+    console.log(slot.code);
+    delete slot.depth;
   });
 
   // TODO: 后期优化掉这种暴力全部 import，虽然对性能没啥大影响
   return { code: code, compiled: compiled, slots: slots, importCode: importCode }
+}
+
+var splitExpressionReg = /(\{\{.+?\}\})/;
+var splitStaticWordReg = /('.+?')|(".+?")/;
+var splitWordReg = /([\{\}\(\)\*\/\?\!\[\]\:\=\+\-\|\&\^\~`><,;%\s])/;
+
+function isVar (s) {
+  return /^[a-zA-Z_$].+/.test(s)
+}
+
+function isExpression (s) {
+  return /\{\{(.+?)\}\}/.test(s)
+}
+
+function isKeyWord (s) {
+  return ['null', 'undefined', 'false', 'true'].indexOf(s) >= 0
+}
+
+function isStatic$1 (s) {
+  return /(^'.*'$)|(^".*"$)/.test(s)
+}
+
+// 处理表达式
+function handleExpression (ex, depth) {
+  return ex.split(splitStaticWordReg).map(function (m) {
+    if (m && !isStatic$1(m)) {
+      // 非静态字段
+      return m.split(splitWordReg).map(function (s) {
+        if (s && !isKeyWord(s) && isVar(s)) {
+          s = setScope(s, depth);
+        }
+        return s
+      }).join('')
+    } else {
+      return m
+    }
+  }).join('')
+}
+
+// 根据slot嵌套的深度设置其访问路径
+function setScope(key, depth) {
+  if (depth === 0) {
+    return key
+  } else if (depth === 1) {
+    return ("$root[$p]." + key)
+  } else {
+    var s = '$root[$p]';
+    for (var i = 1; i < depth; i++) {
+      s = '$root[' + s + '.$p]';
+    }
+    s += "." + key;
+    return s
+  }
 }
 
 /*  */
