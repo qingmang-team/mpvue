@@ -1,3 +1,10 @@
+// import { debugCreator } from 'qm-mp'
+import deepEqual from './fast-deep-equal'
+
+// @Hack：在轻芒内用 debugCreator 来进行调试
+// const mpvueDebug = debugCreator('MPVue', false)
+mpvueDebug = console.log
+
 // fix env
 try {
   if (!global) global = {}
@@ -50,6 +57,14 @@ try {
  */
   function isObject (obj) {
     return obj !== null && typeof obj === 'object'
+  }
+
+  const isEmptyObject = (object) => {
+    for (let x in object) {
+      return false
+    }
+
+    return true
   }
 
   var _toString = Object.prototype.toString
@@ -5202,86 +5217,217 @@ strats.computed = function (parentVal, childVal) {
         }
       })
     } else {
-      var app = global.getApp()
+      const app = global.getApp()
+
       global.Page({
-      // 页面的初始数据
+        $vm: null,
+
+        // 页面的初始数据
         data: {
           $root: {}
         },
 
         handleProxy: function handleProxy (e) {
-          return rootVueVM.$handleProxyWithVue(e)
+          return this.$vm.$handleProxyWithVue(e)
         },
 
         // mp lifecycle for vue
         // 生命周期函数--监听页面加载
         onLoad: function onLoad (query) {
+          this.$vm = new Vue$3({
+            ...rootVueVM.$options,
+            mixins: []
+          })
+
+          if (!this.$vm.$mp) {
+            this.$vm.$mp = {}
+          }
+          const mp = this.$vm.$mp
+
           mp.page = this
           mp.query = query
           mp.status = 'load'
-          getGlobalData(app, rootVueVM)
-          callHook$1(rootVueVM, 'onLoad', query)
+
+          rootVueVM.$mp.query = query
+
+          getGlobalData(app, this.$vm)
+          callHook$1(this.$vm, 'onLoad', query)
         },
 
         // 生命周期函数--监听页面显示
         onShow: function onShow () {
+          const mp = this.$vm.$mp
+
           mp.page = this
           mp.status = 'show'
-          callHook$1(rootVueVM, 'onShow')
+          callHook$1(this.$vm, 'onShow')
 
           // 只有页面需要 setData
-          rootVueVM.$nextTick(function () {
-            rootVueVM._initDataToMP()
+          this.$vm.$nextTick(() => {
+            this.$vm._initDataToMP()
           })
         },
 
         // 生命周期函数--监听页面初次渲染完成
         onReady: function onReady () {
+          const mp = this.$vm.$mp
+
           mp.status = 'ready'
 
-          callHook$1(rootVueVM, 'onReady')
-          next()
+          callHook$1(this.$vm, 'onReady')
+          mountComponent(this.$vm)
         },
 
         // 生命周期函数--监听页面隐藏
         onHide: function onHide () {
+          const mp = this.$vm.$mp
+
           mp.status = 'hide'
-          callHook$1(rootVueVM, 'onHide')
-          mp.page = null
+          callHook$1(this.$vm, 'onHide')
+          // 当页面需要实时更新时，不要注销小程序页面
+          // 启动 setData 持久化更新，这种方式会造成 setData 阻塞，谨慎使用
+          if (!this.$vm.needRealtime) {
+            mp.page = null
+          }
         },
 
         // 生命周期函数--监听页面卸载
         onUnload: function onUnload () {
+          const mp = this.$vm.$mp
+
           mp.status = 'unload'
-          callHook$1(rootVueVM, 'onUnload')
+          callHook$1(this.$vm, 'onUnload')
           mp.page = null
+
+          this.$vm.$destroy()
         },
 
         // 页面相关事件处理函数--监听用户下拉动作
         onPullDownRefresh: function onPullDownRefresh () {
-          callHook$1(rootVueVM, 'onPullDownRefresh')
+          callHook$1(this.$vm, 'onPullDownRefresh')
         },
 
         // 页面上拉触底事件的处理函数
         onReachBottom: function onReachBottom () {
-          callHook$1(rootVueVM, 'onReachBottom')
+          callHook$1(this.$vm, 'onReachBottom')
         },
 
         // 用户点击右上角分享
         onShareAppMessage: rootVueVM.$options.onShareAppMessage
-          ? function (options) { return callHook$1(rootVueVM, 'onShareAppMessage', options) } : null,
+          ? function (options) { return callHook$1(this.$vm, 'onShareAppMessage', options) } : null,
 
         // Do something when page scroll
         onPageScroll: function onPageScroll (options) {
-          callHook$1(rootVueVM, 'onPageScroll', options)
+          callHook$1(this.$vm, 'onPageScroll', options)
         },
 
         // 当前是 tab 页时，点击 tab 时触发
         onTabItemTap: function onTabItemTap (options) {
-          callHook$1(rootVueVM, 'onTabItemTap', options)
+          callHook$1(this.$vm, 'onTabItemTap', options)
         }
       })
     }
+  }
+
+  /**
+   * 对两个 Data 做 Diff，生成最小体积的 DataPatch
+   * @param  {object} prevData
+   * @param  {object} nextData
+   * @param  {string} namespace
+   * @return {object}
+   */
+  const generateSetDataPatch = (prevData, nextData, namespace = '') => {
+    const dataKeys = Object.keys(nextData)
+    let dataPatch = {}
+
+    if (!prevData) {
+      dataPatch = nextData
+      return
+    }
+
+    dataKeys.map(key => {
+      const prevValue = prevData[key]
+      const nextValue = nextData[key]
+      const patchKey = assembleSetDataKey(nextData, key, namespace)
+
+      const $valuesAreArray = (
+        Array.isArray(prevValue) &&
+        Array.isArray(nextValue)
+      )
+
+      const $valuesAreObject = (
+        isObject(prevValue) &&
+        isObject(nextValue)
+      )
+
+      // @case: nextValue 不存在时直接返回
+      // 清空数据需要使用 null
+      if (typeof nextValue === 'undefined') {
+        return
+      }
+
+      // @case: 相等时直接忽略
+      if (deepEqual(prevValue, nextValue)) {
+        return
+      }
+
+      // @case: 新增字段直接覆盖
+      if (!prevValue) {
+        dataPatch[patchKey] = nextValue
+        return
+      }
+
+      // @case: 值为数组，且长度不一致时
+      // setData 不支持数组 Push，不支持设置数组下的某个字段，只能返回整个数组
+      if (
+        $valuesAreArray &&
+        prevValue.length !== nextValue.length
+      ) {
+        dataPatch[patchKey] = nextValue
+        return
+      }
+
+      // @case: 值为数组，且长度相等时
+      // @case: 值为对象时
+      // 针对 Object 进行 Diff，优化 Patch 体积
+      if (
+        ($valuesAreArray && prevValue.length === nextValue.length) ||
+        $valuesAreObject
+      ) {
+        dataPatch = {
+          ...dataPatch,
+          ...generateSetDataPatch(prevValue, nextValue, patchKey)
+        }
+        return
+      }
+
+      // @case 其它情况，直接赋值
+      dataPatch[patchKey] = nextValue
+    })
+
+    return dataPatch
+  }
+
+  /**
+   * 根据小程序 setData 的语法组装 key
+   * @param  {(object|array)} nextData
+   * @param  {string} key
+   * @param  {string} namespace
+   * @return {string}
+   */
+  const assembleSetDataKey = (nextData, key, namespace) => {
+    let nextKey = namespace
+      ? `${namespace}.${key}`
+      : key
+
+    if (Array.isArray(nextData)) {
+      if (!namespace) {
+        throw new Error('数组 Patch 必需包含 Namespace')
+      }
+      nextKey = `${namespace}[${key}]`
+    }
+
+    return nextKey
   }
 
   // 节流方法，性能优化
@@ -5309,7 +5455,6 @@ strats.computed = function (parentVal, childVal) {
     var dataKeys = [].concat(
       Object.keys(vm._data || {}),
       Object.keys(vm._props || {}),
-      Object.keys(vm._mpProps || {}),
       Object.keys(vm._computedWatchers || {})
     )
     return dataKeys.reduce(function (res, key) {
@@ -5338,7 +5483,7 @@ strats.computed = function (parentVal, childVal) {
     // getVmData 这儿获取当前组件内的所有数据，包含 props、computed 的数据
     // 改动 vue.runtime 所获的的核心能力
     var data = Object.assign(getVmData(vm), { $k: $k, $kk: ($k + ','), $p: $p })
-    var key = '$root.' + $k
+    var key = $k
     var res = {}
     res[key] = data
     return res
@@ -5422,12 +5567,28 @@ strats.computed = function (parentVal, childVal) {
 
   // 优化每次 setData 都传递大量新数据
   function updateDataToMP () {
-    var page = getPage(this)
+    const page = getPage(this)
     if (!page) {
       return
     }
 
-    var data = formatVmData(this)
+    const $p = getParentComKey(this).join(',')
+    const $k = $p + ($p ? ',' : '') + getComKey(this)
+
+    const vmData = {
+      $root: {
+        [$k]: Object.assign(getVmData(this), { $k: $k, $kk: ($k + ','), $p: $p })
+      }
+    }
+
+    const data = generateSetDataPatch(page.data, vmData)
+
+    if (isEmptyObject(data)) {
+      return
+    }
+
+    mpvueDebug('update setDataPatch', page.route, data)
+
     throttleSetData(page.setData.bind(page), data)
   }
 
@@ -5437,7 +5598,13 @@ strats.computed = function (parentVal, childVal) {
       return
     }
 
-    var data = collectVmData(this.$root)
+    const vmData = {
+      $root: collectVmData(this.$root)
+    }
+
+    const data = generateSetDataPatch(page.data, vmData)
+    mpvueDebug('init setDataPatch', page.route, data)
+
     page.setData(data)
   }
 
